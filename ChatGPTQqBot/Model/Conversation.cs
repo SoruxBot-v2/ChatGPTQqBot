@@ -1,4 +1,4 @@
-namespace ChatGPTQqBot.Model;
+namespace ChatGPTQQBot.Model;
 
 public class Conversation(string model)
 {

@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace ChatGPTQqBot.Model;
+namespace ChatGPTQQBot.Model;
 
 public class Message(string role, string content)
 {

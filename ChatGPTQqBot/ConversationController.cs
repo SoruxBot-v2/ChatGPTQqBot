@@ -1,4 +1,4 @@
-using ChatGPTQqBot.Model;
+using ChatGPTQQBot.Model;
 using RestSharp;
 using SoruxBot.SDK.Attribute;
 using SoruxBot.SDK.Model.Attribute;
@@ -7,8 +7,9 @@ using SoruxBot.SDK.Plugins.Basic;
 using SoruxBot.SDK.Plugins.Model;
 using SoruxBot.SDK.Plugins.Service;
 using SoruxBot.SDK.QQ;
+using Newtonsoft.Json.Linq;
 
-namespace ChatGPTQqBot;
+namespace ChatGPTQQBot;
 
 public class ConversationController(ILoggerService loggerService, ICommonApi bot, IPluginsDataStorage dataStorage) : PluginController
 {
@@ -16,8 +17,10 @@ public class ConversationController(ILoggerService loggerService, ICommonApi bot
     private readonly IPluginsDataStorage _dataStorage = dataStorage;
     private ILoggerService _logger = loggerService;
     private RestClient _client = new("https://service.soruxgpt.com/api/api/v1/chat/completions");
-    
-    [MessageEvent(MessageType.PrivateMessage)]
+	private string _bearerToken = "sk-H9KV0GXczORw0OZRCvrRCptR28lEqXwOJtQgoMFKYvZmhUiU";
+	private const int _maxConversationCount = 10;
+
+	[MessageEvent(MessageType.PrivateMessage)]
     [Command(CommandPrefixType.Single, "gpt <action> <param>")]
     public PluginFlag SetUserToken(MessageContext context, string action, string param)
     {
@@ -94,32 +97,58 @@ public class ConversationController(ILoggerService loggerService, ICommonApi bot
                 .Build(), 
             context.BotAccount
         );
-        
+
         do
         {
-            bot.QqReadNextGroupMessageAsync(
-                context.TriggerId,
-                context.TriggerPlatformId,
-                ctx =>
-                {
-                    var req = GetSoruxGptRequest(token)
-                        .AddJsonBody(conversation);
-                    
-                    return PluginFlag.MsgIntercepted;
-                },
-                ctx =>
-                {
-                    _bot.QqSendGroupMessage(
-                        QqMessageBuilder
-                            .GroupMessage(context.TriggerPlatformId)
-                            .Text("你好，你在超时时间内未输入任何内容，对话已结束。")
-                            .Build(), 
-                        context.BotAccount
-                    );
-                    loop = false;
-                    return PluginFlag.MsgIntercepted;
-                }
-                );
+            var msg = new Task<MessageContext?>(()=> bot.QqReadNextGroupMessageAsync(context.TriggerId, context.TriggerPlatformId).Result).Result;
+			if(msg != null)
+			{
+				var userMessage = new Message("user",
+					msg.MessageChain!.Messages.Select(p => p.ToPreviewText()).Aggregate((t1, t2) => t1 + t2));
+				// TODO 改成优雅的停止方式
+				if (userMessage.Content == "#gpt stop") break;
+
+				var postRequest = new RestRequest(string.Empty, Method.Post);
+				postRequest.AddHeader("Authorization", $"Bearer {_bearerToken}");
+				postRequest.AddJsonBody(
+						new RequestBody(model, conversation.Messages.Append(userMessage).ToList())
+					);
+				var getResponse = _client.Execute(postRequest);
+				if(getResponse.IsSuccessful)
+				{
+					_logger.Info("ChatGPTQQBot-Chat", "Successfully get response");
+					var responseContent = JObject.Parse(getResponse.Content!);
+					conversation.Messages.Add(userMessage);
+					conversation.Messages.Add(new Message("system", getResponse.Content!));
+					if (conversation.Messages.Count > 2 * _maxConversationCount)
+					{
+						_bot.QqSendGroupMessage(QqMessageBuilder
+						.GroupMessage(context.TriggerPlatformId)
+						.Text($"对话数量已超上限({_maxConversationCount}条)，对话自动终止")
+						.Build(),
+						context.BotAccount);
+						break;
+					}
+					else
+					{
+						_bot.QqSendGroupMessage(QqMessageBuilder
+							.GroupMessage(context.TriggerPlatformId)
+							.Text((string)responseContent["choices"]![0]!["message"]!["content"]!)
+							.Build(),
+							context.BotAccount);
+						_logger.Info("ChatGPRQQBot-Chat", "Token usage:" + responseContent["usage"]);
+					}
+				}
+				else
+				{
+					_logger.Info("ChatGPTQQBot-Chat", $"Failed to get response, error code: {getResponse.StatusCode}");
+					_bot.QqSendGroupMessage(QqMessageBuilder
+						.GroupMessage(context.TriggerPlatformId)
+						.Text("获取回复失败，错误码：" + getResponse.StatusCode)
+						.Build(),
+						context.BotAccount);
+				}
+			}
         } while (loop);
         return PluginFlag.MsgIntercepted;
     }
